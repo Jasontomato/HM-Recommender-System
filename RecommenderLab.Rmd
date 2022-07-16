@@ -1,0 +1,311 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+```{r}
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(recommenderlab)
+library(Metrics)
+library(purrr)
+library(data.table)
+library(ggplot2)
+library(arulesViz)
+library(tibble)
+library(RColorBrewer)
+```
+
+
+# get data from transaction
+```{r}
+setwd('')
+```
+## Data Preprocessing
+
+```{r}
+transaction <- read.csv('D:\\Kaggle competition\\h-and-m-personalized-fashion-recommendations\\transactions_train.csv')
+article <- read.csv('D:\\Kaggle competition\\h-and-m-personalized-fashion-recommendations\\articles.csv')
+```
+
+## select customer id and transaction to build user-item matrix
+```{r}
+transactions_recommendation <- data.frame(
+  customer_number=as.numeric(factor(transaction$customer_id[1:10000])),
+  article_id=as.numeric(transaction$article_id[1:10000]),
+  customer_id=as.factor(transaction$customer_id[1:10000]))
+head(transactions_recommendation,5)
+
+```
+
+```{r}
+user_item_data <- data.frame(customer_number=transactions_recommendation[,1],
+                             article_id=paste0("0", transactions_recommendation[,2]))
+head(user_item_data)
+```
+
+## pivot wider transaction data 
+```{r}
+user_item_data$value = 1
+user_item_data <- user_item_data%>% pivot_wider(names_from = article_id, values_from = value, values_fn = mean,values_fill = 0)
+user_item_data
+```
+
+## convert data into binaryRatingsMatrix
+```{r}
+user_item_matrix = user_item_data %>% select(-customer_number) %>% 
+#Convert to matrix
+    as.matrix() %>%
+# Convert to recommenderlab class 'binaryRatingsMatrix'
+    as("binaryRatingMatrix")
+user_item_matrix
+```
+## deploy evaluation scheme and k fold cross-validation partition
+
+```{r}
+scheme <- user_item_matrix %>% 
+  evaluationScheme(method = "cross", 
+                   k      = 5, 
+                   train  = 0.8,  
+                   given  = -1)
+```
+
+## Comparing 5 methods:
+* association rules
+* item-based CF
+* user-based CF
+* random items
+* popular items
+```{r}
+algorithms <- list(
+  "association rules" = list(name  = "AR", 
+                        param = list(supp = 0.001, conf = 0.01)),
+  "random items"      = list(name  = "RANDOM",  param = NULL),
+  "popular items"     = list(name  = "POPULAR", param = NULL),
+  "item-based CF"     = list(name  = "IBCF", param = list(k = 5)),
+  "user-based CF"     = list(name  = "UBCF", 
+                        param = list(method = "Cosine", nn = 500))
+                   )
+```
+
+## Make a recommendation based on Top N products
+```{r}
+results <- recommenderlab::evaluate(scheme, 
+                                    algorithms, 
+                                    type  = "topNList", 
+                                    n     = c(1, 3, 5, 10, 15, 20) #how many recommendations to calculate with
+                                    )
+```
+```{r}
+results
+```
+## 5 methods comparasion
+
+```{r}
+# calculate average score in k fold evaluation function
+avg_conf_matr <- function(results) {
+  tmp <- results %>%
+    getConfusionMatrix()  %>%  
+    as.list() 
+    as.data.frame(Reduce("+",tmp) / length(tmp)) %>% 
+    mutate(n = c(1, 3, 5, 10, 15, 20)) %>%
+    select('n', 'precision', 'recall', 'TPR', 'FPR') 
+}
+```
+```{r}
+
+results_tbl <- results %>% 
+  map(avg_conf_matr) %>% 
+# Turning into an unnested tibble
+  enframe() %>%
+# Unnesting to have all variables on same level
+  unnest()
+results_tbl
+```
+```{r}
+library(forcats)
+results_tbl %>%
+  ggplot(aes(FPR, TPR, 
+             colour = fct_reorder2(as.factor(name), 
+                      FPR, TPR))) +
+  geom_line() +
+  geom_label(aes(label = n))  +
+  labs(title = "ROC curves", colour = "Model") +
+  theme_grey(base_size = 14)
+```
+```{r}
+results_tbl %>%
+  ggplot(aes(recall, precision, 
+             colour = fct_reorder2(as.factor(name),  
+                      precision, recall))) +
+  geom_line() +
+  geom_label(aes(label = n))  +
+  labs(title = "Precision-Recall curves", colour = "Model") +
+  theme_grey(base_size = 14)
+```
+
+
+## implement one Assocaition rule to visualization 
+```{r}
+algorithms_AR <- list(
+  "association rules" = list(name  = "AR", 
+                        param = list(supp = 0.001, conf = 0.01))
+                   )
+
+```
+
+
+
+```{r}
+results <- recommenderlab::evaluate(scheme, 
+                                    algorithms_AR, 
+                                    type  = "topNList", 
+                                    n     = c(1, 3, 5, 10, 15, 20) #how many recommendations to calculate with
+                                    )
+```
+
+## give average matrics score of association rule
+```{r}
+tmp3 <- results$`association rules` %>%
+  getConfusionMatrix()  %>%  
+  as.list() 
+tmp3
+
+```
+
+```{r}
+
+r <- Recommender(getData(scheme,"train"), "AR",param = list(supp = 0.001, conf = 0.01))
+
+```
+
+```{r}
+rules = r@model$rule_base
+rules3 = as(rules, "data.frame")
+rules3
+```
+```{r}
+plot(rules, measure = c("support", "lift"), shading = "confidence")
+```
+```{r}
+plot(rules, method = "matrix", engine = "3d", measure = "lift")
+
+```
+```{r}
+subrules2 <- head(rules, n = 10, by = "lift")
+plot(subrules2, method = "Graph")
+
+```
+## make a prediciton on item-based CF
+```{r}
+# make a prediction
+customer_order <- c(501323011,531310002,501820043)
+new_user <- data.frame(customer_number=1,
+                             article_id=paste0("0", customer_order))
+new_user
+```
+
+
+```{r}
+one_col = as(user_item_matrix, "matrix")[1,]
+
+one_col[1:4903] =FALSE
+one_col[new_user$article_id]= TRUE
+summary(one_col[1:4903])
+
+```
+```{r}
+new_user_data=one_col %>% 
+  as.matrix() %>% 
+  t() %>% 
+  as("binaryRatingMatrix")
+new_user_data
+```
+
+```{r}
+recomm <- Recommender(getData(scheme, 'train'), 
+                       method = "IBCF",  
+                       param = list(k = 5))
+recomm
+
+```
+
+```{r}
+pred <- predict(recomm, 
+                newdata = new_user_data, 
+                n       = 10)
+```
+```{r}
+as(pred, 'list')
+```
+
+## In the following part we made anther association rule to detect the relationship between grouped products. Since the former job focused on the item.
+```{r}
+trans.asso = transaction[1:10000,]
+part.article = article[,c("article_id","product_type_name")]
+m = merge(x = trans.asso, y = part.article, by = "article_id", all.x = TRUE)
+m = m %>% select(customer_id,product_type_name)
+
+```
+```{r}
+transactions_recommendation_p <- data.frame(
+  customer_number=as.numeric(factor(m$customer_id[1:10000])),
+  article_id=as.factor(m$product_type_name[1:10000]),
+  customer_id=as.factor(m$customer_id[1:10000]))
+head(transactions_recommendation_p,5)
+```
+```{r}
+user_item_data_p <- data.frame(customer_number=transactions_recommendation_p[,1],
+                             article_id= transactions_recommendation_p[,2])
+head(user_item_data_p)
+user_item_data_p$value = 1
+user_item_data_p <- user_item_data_p%>% pivot_wider(names_from = article_id, values_from = value, values_fn = mean,values_fill = 0)
+user_item_data_p
+```
+
+```{r}
+user_item_matrix_p = user_item_data_p %>% select(-customer_number) %>% 
+#Convert to matrix
+    as.matrix() %>%
+# Convert to recommenderlab class 'binaryRatingsMatrix'
+    as("binaryRatingMatrix")
+user_item_matrix_p
+
+
+```
+
+```{r}
+scheme_p <- user_item_matrix_p %>% 
+  evaluationScheme(method = "cross", 
+                   k      = 5, 
+                   train  = 0.8,  
+                   given  = -1)
+```
+```{r}
+r_p <- Recommender(getData(scheme_p,"train"), "AR",param = list(supp = 0.001, conf = 0.01))
+```
+```{r}
+rules_p= r_p@model$rule_base
+rules_ppp = as(rules_p, "data.frame")
+rules_ppp
+```
+```{r}
+plot(rules_ppp, measure = c("support", "lift"), shading = "confidence")
+```
+```{r}
+# graph of association rule based on article group
+subrules2 <- head(rules_p, n = 15, by = "lift")
+plot(subrules2, method = "graph")
+```
+```{r}
+plot(rules_p, method = "matrix", engine = "3d", measure = "lift")
+```
+
+
